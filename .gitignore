@@ -1,0 +1,6 @@
+.env
+loss-plot.pdf
+finetuned_model.pth
+model_cache*
+Miniforge3.sh
+.idea*
