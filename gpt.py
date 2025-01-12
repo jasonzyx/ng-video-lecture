@@ -8,7 +8,7 @@ import datetime
 PROD = False
 batch_size = 64 if PROD else 16 # how many independent sequences will we process in parallel?
 block_size = 256 if PROD else 128 # what is the maximum context length for predictions?
-max_iters = 5000 if PROD else 1000
+max_iters = 5000 if PROD else 100
 eval_interval = 500 if PROD else 10
 learning_rate = 3e-4 if PROD else 1e-3
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -40,15 +40,33 @@ n = int(0.9*len(data)) # first 90% will be train, rest val
 train_data = data[:n]
 val_data = data[n:]
 
-# data loading
-def get_batch(split):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
+class TextDataset(torch.utils.data.Dataset):
+    def __init__(self, data, block_size):
+        self.data = data
+        self.block_size = block_size
+
+    def __len__(self):
+        return len(self.data) - self.block_size
+
+    def __getitem__(self, idx):
+        chunk = self.data[idx:idx + self.block_size + 1]
+        x = chunk[:-1]
+        y = chunk[1:]
+        return x, y
+
+# Replace get_batch with DataLoader setup
+train_dataset = TextDataset(train_data, block_size)
+val_dataset = TextDataset(val_data, block_size)
+train_loader = torch.utils.data.DataLoader(
+    train_dataset, 
+    batch_size=batch_size,
+    shuffle=True
+)
+val_loader = torch.utils.data.DataLoader(
+    val_dataset, 
+    batch_size=batch_size,
+    shuffle=True
+)
 
 @torch.no_grad()
 def estimate_loss():
@@ -56,8 +74,11 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        loader = train_loader if split == 'train' else val_loader
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            # Get batch from appropriate loader
+            X, Y = next(iter(loader))
+            X, Y = X.to(device), Y.to(device)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -207,21 +228,28 @@ print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 def train_model(model, optimizer, max_iters, eval_interval):
-    for iter in range(max_iters):
-
-        # every once in a while evaluate the loss on train and val sets
-        if iter % eval_interval == 0 or iter == max_iters - 1:
-            losses = estimate_loss()
-            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
-        # sample a batch of data
-        xb, yb = get_batch('train')
-
-        # evaluate the loss
-        logits, loss = model(xb, yb)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+    total_steps = 0
+    
+    while total_steps < max_iters:
+        for batch_idx, (X, Y) in enumerate(train_loader):
+            if total_steps >= max_iters:
+                break
+                
+            X, Y = X.to(device), Y.to(device)
+            
+            # evaluate the loss
+            logits, loss = model(X, Y)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            
+            if total_steps % eval_interval == 0:
+                losses = estimate_loss()
+                print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                      f"step {total_steps}: "
+                      f"train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            
+            total_steps += 1
 
     return model
 
